@@ -1,2 +1,2 @@
 # deebee
-A database helper lib.
+A asynchronous database helper lib.
