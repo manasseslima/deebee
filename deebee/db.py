@@ -1,134 +1,635 @@
+import asyncio
 import datetime
-import os
+from deebee.pool import Pool
 
 
-def get_connection():
-    params = get_connection_params()
-    connection = psycopg2.connect(**params)
-    return connection
+__all__ = ['DataManager']
 
 
-class DB:
-    async def query(self, sql, *, params=None, select=True, one=False, last=False, value=False, model=None):
-        con = get_connection()
-        cur = con.cursor()
-        try:
-            cur.execute(sql, params)
-            if select:
-                columns = [col.name for col in cur.description]
-                rows = cur.fetchall()
-                if one:
-                    item = (rows[-1] if last else rows[0]) if rows else []
-                    if value:
-                        data = item[0] if item else None
-                    else:
-                        data = {pair[0]: pair[1] for pair in list(zip(columns, item))}
-                        if model:
-                            data = model(**data)
-                else:
-                    if model:
-                        data = [model(**{pair[0]: pair[1] for pair in list(zip(columns, item))}) for item in rows]
-                    else:
-                        data = [{pair[0]: pair[1] for pair in list(zip(columns, item))} for item in rows]
-                return data
-            else:
-                cur.commit()
-        except Exception as e:
-            raise Exception(e)
-        finally:
-            cur.close()
-            con.close()
+def identify_operator(
+        key: str
+) -> tuple[str, str, str]:
+    """Identify what operator by key __ suffix.
 
-    async def select(self, sql, params=None, model=None):
+    :param key:
+    :return:
+    """
+    spt = key.split('__')
+    op = '='
+    code = ''
+    name = spt[0]
+    if len(spt) > 1:
+        code = spt[1]
+        if code == 'in':
+            op = 'in'
+        elif code == 'nin':
+            op = 'not in'
+        elif code == 'eq':
+            op = '='
+        elif code == 'neq':
+            op = '<>'
+        elif code == 'gt':
+            op = '>'
+        elif code == 'gte':
+            op = '>='
+        elif code == 'lt':
+            op = '<'
+        elif code == 'lte':
+            op = '<='
+        elif code in ['between', 'bw']:
+            op = 'between'
+        elif code in ['starts', 'st']:
+            op = 'like'
+        elif code in ['ends', 'ed']:
+            op = 'like'
+        elif code == ['contains', 'ct']:
+            op = 'like'
+    return name, op, code
+
+
+def make_column_alias(column):
+    spt = column.split(':')
+    if len(spt) > 1:
+        return f'{spt[0]} as "{spt[1]}"'
+    return spt[0]
+
+
+def make_columns_section(columns):
+    if not columns:
+        return '*'
+    ret = ', '.join(make_column_alias(col) for col in columns)
+    return ret
+
+
+class DataManager:
+    def __init__(self, pool=None):
+        self.pool = pool or Pool()
+
+    def __del__(self):
+        self.pool.close()
+
+    async def select(
+            self,
+            sql: str,
+            *,
+            params: list | tuple = None,
+            model: any = None,
+            timeout: int = None
+    ) -> list | tuple:
+        """Returns data list by query
+
+        Execute a current select query passed by sql param. Each item by list is a dict
+        representing a row returned by query. When the model param is set, each row will be a instance of this model.
+
+        This returns a list of rows when have data and an empty list when nothing was found.
+        :param sql:
+        :param params:
+        :param model:
+        :param timeout:
+        :return:
+        """
         if not params:
             params = []
-        data = await self.query(sql, params=params, model=model)
-        return data
+        data = await self.__query(sql, params=params, model=model, timeout=timeout)
+        return data or (None if model else [])
 
-    async def row(self, sql, params=None, model=None, last=False):
+    async def row(
+            self,
+            sql: str,
+            *,
+            params: list | tuple = None,
+            model: any = None,
+            last: bool = False,
+            timeout=None
+    ) -> dict | any:
+        """Returns the data as dict
+
+        Executes command sql passed by sql param and return just one registry. If query retrive more than one row,
+        by default the first row is selected. The last row can be selected by setting true 'last' param.
+
+        This return a dict type object. When nothing was returned by query, an empty dict is returned.
+        :param sql:
+        :param params:
+        :param model:
+        :param last:
+        :param timeout:
+        :return:
+        """
+        if not params:
+            params = ()
+        data = await self.__query(sql, params=params, one=True, model=model, last=last, timeout=timeout)
+        return data or {}
+
+    async def value(
+            self,
+            sql: str,
+            *,
+            params: list | tuple = None,
+            timeout: int = None
+    ) -> any:
+        """Returns only one value.
+
+        This execute query em return just the first column from first rows of the returned list by default.
+
+        :param sql:
+        :param params:
+        :param timeout:
+        :return:
+        """
+        v = await self.__query(sql, params=params, one=True, value=True, timeout=timeout)
+        return v
+
+    async def execute(
+            self,
+            sql: str,
+            *,
+            params=None,
+            timeout=None
+    ) -> any:
+        """Execute a sql command.
+
+        :param sql:
+        :param params:
+        :param timeout:
+        :return:
+        """
         if not params:
             params = []
-        data = await self.query(sql, params=params, one=True, model=model, last=last)
-        return data
-
-    async def value(self, sql, params=None):
-        v = await self.query(sql, params=params, one=True, value=True)
-        return v or 0
-
-    async def execute(self, sql, params=None):
-        if not params:
-            params = []
-        ret = await self.query(sql, params=params, select=False)
+        ret = await self.__query(sql, params=params, select=False, timeout=timeout)
         return ret
 
-    async def list(self, table, *, where=None, order=None, model=None):
+    async def aslist(
+            self,
+            table: str,
+            *,
+            columns: list[str] | tuple[str] | str = None,
+            where: dict = None,
+            order: list[str] | tuple[str] | str = None,
+            model: any = None
+    ) -> list | tuple:
+        """Creates a query and return a list.
+
+        This is a helper method that takes the table name, columns list and a constraint dict and generate
+        a sql command. With this sql generated, the select method is called to retrive the data.
+
+        The return is the value returned by select method.
+
+        :param table:
+        :param columns:
+        :param where:
+        :param order:
+        :param model:
+        :return:
+        """
         if not where:
             where = {}
         if not order:
-            order = {}
-        sql = self._make_query_sql(table, where=where, order=order)
+            order = ()
+        if not columns:
+            columns = ()
+        sql = self.__generate_query_sql(table, columns=columns, where=where, order=order)
         data = await self.select(sql, model=model)
         return data
 
-    async def item(self, table, pk, *, key='id', model=None):
-        where = {key: pk}
-        sql = self._make_query_sql(table, where=where, order={})
+    async def array(
+            self,
+            table: str,
+            *,
+            column: str = '',
+            where: dict = None,
+            order: str | tuple | list = '',
+            model: any = None
+    ) -> list | tuple:
+        """Special method to get a list of values without keys. This get first column of each row retried.
+
+        :param table:
+        :param column:
+        :param where:
+        :param order:
+        :param model:
+        :return:
+        """
+        data = await self.aslist(table, columns=[column], where=where, order=order, model=model)
+        data = [row[column] for row in data]
+        return data
+
+    async def item(
+            self,
+            table: str,
+            *,
+            pk: str | int | float = '',
+            key: str = '',
+            where: dict = None,
+            model: any = None,
+            order: dict | list[str] | tuple[str] | str = ''
+    ) -> dict | any:
+        """Return the item by query generated by arguments
+
+        :param table:
+        :param pk:
+        :param key:
+        :param where:
+        :param model:
+        :param order:
+        :return:
+        """
+        if not where:
+            where = {key: pk} if pk else {}
+        sql = self.__generate_query_sql(table, where=where, order=order)
         item = await self.row(sql, model=model)
         return item
 
-    async def count(self, table, *, where=None):
+    async def count(
+            self,
+            table: str,
+            *,
+            where: dict = None
+    ) -> any:
+        """Return the number of rows affected.
+
+        :param table:
+        :param where:
+        :return:
+        """
         if not where:
             where = {}
-        sql = self._make_query_sql(table, where=where, order={})
+        where_section = self.__generate_where_section(where=where)
+        sql = f"""select count(*) as count from {table} {where_section}"""
         c = await self.value(sql)
-        return c
+        return 0 if c is None else c
 
-    async def insert(self, table, *, data=None, model=None):
-        sql = self.make_insert_sql(table, data)
-        data = await self.query(sql, one=True, model=model)
+    async def insert(
+            self,
+            table: str,
+            *,
+            data: dict | list = None,
+            model: any = None
+    ) -> dict | any:
+        sql = self.__generate_insert_command(table, data)
+        data = await self.__query(sql, one=True, model=model)
         return data
 
-    async def update(self, table, *, key='id', data=None, model=None):
-        sql = self.make_update_sql(table, data, where={key: data[key]})
-        data = await self.query(sql, one=True, model=model)
+    async def update(
+            self,
+            table: str,
+            *,
+            key: str | tuple | list = '',
+            data: dict | list | tuple = None,
+            model: any = None
+    ) -> dict | any:
+        """Updates table with given data.
+
+        :param table:
+        :param key:
+        :param data:
+        :param model:
+        :return:
+        """
+        keys_cols = key.split(',')
+        if isinstance(data, dict):
+            where = {k: data[k] for k in keys_cols}
+        else:
+            where = {k: None for k in keys_cols}
+        sql = self.__generate_update_command(table, data, where=where)
+        data = await self.__query(sql, one=True, db=db, model=model)
         return data
 
-    async def change(self, table, *, data=None, where=None, model=None):
-        sql = self.make_update_sql(table, data, where=where)
-        data = await self.query(sql, one=True, model=model)
+    async def apply(
+            self,
+            table: str,
+            *,
+            key: str | tuple | list = '',
+            sort: str | tuple | list = '',
+            data: dict | list = None,
+            model: any = None
+    ):
+        """Verify if each data is in table and choose if call update or insert.
+
+        :param table:
+        :param key:
+        :param sort:
+        :param data:
+        :param model:
+        :return:
+        """
+        if not data:
+            return data
+        if not key:
+            raise Exception('The key column must be informed!')
+        if isinstance(data, list):
+            keys_cols = key.split(',') or data[0].keys()
+            sort_cols = sort.split(',')
+            where_key = {k: data[0][k] for k in keys_cols}
+            where_sort = {f'{k}__in': [item[k] for item in data] for k in sort_cols}
+            where = {**where_key, **where_sort}
+            column = sort_cols[0] if sort_cols else keys_cols[0]
+            array = self.array(table, column=column, where=where)
+            update_data = []
+            insert_data = []
+            for item in data:
+                if item[column] in array:
+                    update_data.append(item)
+                else:
+                    insert_data.append(item)
+            resp = await asyncio.gather(
+                self.update(table, key=key, data=update_data, model=model),
+                self.insert(table, data=insert_data, model=model)
+            )
+            return resp
+        else:
+            keys_cols = key.split(',') or data.keys()
+            count = await self.count(table, where={k: data[k] for k in keys_cols})
+            if count:
+                data = await self.update(table, key=key, data=data, model=model)
+            else:
+                data = await self.insert(table, data=data, model=model)
+            return data
+
+    async def change(
+            self,
+            table: str,
+            *,
+            data: dict = None,
+            where: dict = None, db='', model=None
+    ) -> dict | any:
+        """Update registry by conditions given.
+
+        :param table:
+        :param data:
+        :param where:
+        :param db:
+        :param model:
+        :return:
+        """
+        sql = self.__generate_update_command(table, data, where=where)
+        data = await self.__query(sql, one=True, model=model)
         return data
 
-    def _make_query_sql(self, table, where, order):
-        where_sql = self._make_where_section(where)
-        order_sql = self._make_order_section(order)
-        sql = f"""select * from {table} {where_sql} {order_sql}"""
+    async def delete(
+            self,
+            table: str,
+            *,
+            key: str = '',
+            pk: str | int | float = None
+    ) -> dict | any:
+        """Remove table row by given key.
+
+        :param table:
+        :param key:
+        :param pk:
+        :return:
+        """
+        where = {key: pk}
+        sql = self.__generate_delete_command(table, where=where)
+        item = await self.item(table, key=key, pk=pk)
+        await self.execute(sql)
+        return item
+
+    def __generate_query_sql(
+            self,
+            table: str,
+            columns: list | str | tuple = '*',
+            where: dict = None,
+            order: str | dict | list | tuple = ''
+    ) -> str:
+        """Generate sql query.
+
+        :param table:
+        :param columns:
+        :param where:
+        :param order:
+        :return:
+        """
+        where = where or {}
+        columns_sql = make_columns_section(columns)
+        where_sql = self.__generate_where_section(where)
+        order_sql = self.__generate_order_section(order)
+        sql = f"""select {columns_sql} from {table} {where_sql} {order_sql}"""
         return sql
 
-    def make_update_sql(self, table, data, where):
-        sql = ''
+    def __generate_update_command(
+            self,
+            table: str,
+            data: dict | list,
+            where: dict = None,
+            output: str = '*'
+    ) -> str:
+        """Generate update command.
+
+        :param table:
+        :param data:
+        :param where:
+        :param output:
+        :return:
+        """
+        if not data:
+            return ''
+        set_section = self.__generate_set_section(data)
+        where_section = self.__generate_where_section(where, multi=isinstance(data, list))
+        sql = f"update {table} as u set {set_section} {where_section} returning {output}"
         return sql
 
-    def make_insert_sql(self, table, data):
-        columns = ','.join(data.keys())
-        values = ','.join([self._make_value(v) for k, v in data.items()])
-        sql = f"""insert into {table}({columns}) values({values})"""
+    def __generate_insert_command(
+            self,
+            table: str,
+            data: dict | list | tuple,
+            output: str = '*'
+    ) -> str:
+        """Generate insert command
+
+        :param table:
+        :param data:
+        :param output:
+        :return:
+        """
+        if not data:
+            return ''
+        if isinstance(data, dict):
+            data = [data]
+        columns = ', '.join(data[0].keys())
+        values_section = ','.join([f"({','.join([self.__build_value(v) for k, v in item.items()])})" for item in data])
+        sql = f"""insert into {table}({columns}) values {values_section} returning {output}"""
         return sql
 
-    def _make_where_section(self, where):
-        sql = 'and'.join([f"{k} = {self._make_value(v)}" for k, v in where.items()])
+    def __generate_delete_command(
+            self,
+            table: str,
+            where: dict
+    ) -> str:
+        """Generate delete command.
+
+        :param table:
+        :param where:
+        :return:
+        """
+        where_section = self.__generate_where_section(where)
+        sql = f"""delete from {table} {where_section}"""
+        return sql
+
+    def __generate_where_section(
+            self,
+            where: dict = None,
+            multi=False
+    ) -> str:
+        """Generate where section.
+
+        :param where:
+        :param multi:
+        :return:
+        """
+        if not where:
+            return ''
+        sql = ' and '.join([self.__mount_where_pair(k, v, multi) for k, v in where.items()])
         if sql:
             sql = f"where {sql}"
         return sql
 
-    def _make_order_section(self, order):
-        sql = ''
+    def __generate_set_section(
+            self,
+            data: dict = None
+    ) -> str:
+        """Generate set section.
+
+        :param data:
+        :return:
+        """
+        if not data:
+            return ''
+        if isinstance(data, dict):
+            sql = ', '.join([f"{k} = {self.__build_value(v)}" for k, v in data.items()])
+        else:
+            columns = data[0].keys()
+            set_columns_section = ', '.join(f"{k} = u2.{k}" for k in columns)
+            values_section = ', '.join(f"({','.join([self.__build_value(v) for k, v in item.items()])})" for item in data)
+            columns_section = ', '.join(k for k in columns)
+            sql = f"{set_columns_section} from (values {values_section}) as u2({columns_section})"
         return sql
 
-    def _make_value(self, value):
+    def __generate_order_section(
+            self,
+            order: str | dict | list | tuple = ''
+    ) -> str:
+        """Generate order section.
+
+        :param order:
+        :return:
+        """
+        cols = order
+        if isinstance(order, str):
+            cols = order.split(',')
+        sql = ','.join(cols)
+        return sql
+
+    def __build_value(
+            self,
+            value: any,
+            code: str = ''
+    ) -> str:
+        """Return correct value by type.
+
+        :param value:
+        :param code:
+        :return:
+        """
+        if code in ('starts', 'st'):
+            return f"'{value}%'"
+        if code in ('ends', 'ed'):
+            return f"'%{value}'"
+        if code in ('contains', 'ct'):
+            return f"'%{value}%'"
+        if code in ('between', 'bw'):
+            if isinstance(value, (int, float)):
+                return f"{value[0]} and {value[1]}"
+            return f"'{value[0]}' and '{value[1]}'"
+        if code in ('in', 'nin'):
+            return f"""({f','.join((f"{v}" if isinstance(v, (int, float, bool)) else f"'{v}'" for v in value))})"""
         if isinstance(value, (int, float)):
-            return f"{value}"
+            return f'{value}'
+        if isinstance(value, bool):
+            return "true" if value else "false"
         if isinstance(value, datetime.datetime):
             return f"'{value.isoformat()}'"
         if isinstance(value, datetime.date):
             return f"'{value.strftime('%Y-%m-%d')}'"
+        if value is None:
+            return 'null'
+        if value.startswith('ST_'):
+            return value
+        if isinstance(value, str):
+            value = value.replace("'", "''").replace("’", "''")
         return f"'{value}'"
+
+    def __mount_where_pair(
+            self,
+            key: str,
+            value: any,
+            multi: bool = False
+    ) -> str:
+        """
+
+        :param key:
+        :param value:
+        :param multi:
+        :return:
+        """
+        name, operator, code = identify_operator(key)
+        if multi:
+            ret = f"u2.{name} {operator} u.{name}"
+        else:
+            ret = f"{name} {operator} {self.__build_value(value, code)}"
+        return ret
+
+    async def __query(
+            self,
+            sql,
+            *,
+            params=None,
+            select=True,
+            one=False,
+            last=False,
+            value=False,
+            model=None,
+            timeout=None
+    ) -> list | tuple | dict | any:
+        """Execute all queries mounted by class.
+
+        :param sql:
+        :param params:
+        :param select:
+        :param one:
+        :param last:
+        :param value:
+        :param model:
+        :param timeout:
+        :return:
+        """
+        con = await self.pool.get_connection()
+        cur = await con.cursor()
+        try:
+            await cur.execute(sql, params, timeout=timeout)
+            if select:
+                columns = [col.name for col in cur.description]
+                if one:
+                    item = await cur.fetchone()
+                    if value:
+                        data = item[0] if item else None
+                    else:
+                        data = dict(zip(columns, item))
+                        if model:
+                            data = model(**data)
+                else:
+                    rows = await cur.fetchall()
+                    if model:
+                        data = [model(**{pair[0]: pair[1] for pair in list(zip(columns, item))}) for item in rows]
+                    else:
+                        data = [dict(zip(columns, item)) for item in rows]
+                return data
+            else:
+                ...
+        except Exception as e:
+            if select:
+                return None
+            else:
+                raise Exception(e)
+        finally:
+            cur.close()

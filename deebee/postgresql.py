@@ -1,4 +1,24 @@
+import os
+import aiopg
 import psycopg2
+
+
+def get_dsn(base_key=''):
+    user, password, database, host, port = get_db_params(base_key=base_key).values()
+    dsn = f"dbname={database} user={user} password={password} host={host} port={port}"
+    return dsn
+
+
+def get_db_params(base_key=''):
+    prefix = f'DB_{base_key.upper()}' if base_key else 'DB'
+    params = {
+        'user': os.getenv(f'{prefix}_USER'),
+        'password': os.getenv(f'{prefix}_PASSWORD'),
+        'database': os.getenv(f'{prefix}_NAME'),
+        'host': os.getenv(f'{prefix}_HOST'),
+        'port': os.getenv(f'{prefix}_PORT', 5432),
+    }
+    return params
 
 
 def get_connection_string():
