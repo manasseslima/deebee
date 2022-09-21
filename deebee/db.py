@@ -637,3 +637,4 @@ class DB:
                 raise Exception(e)
         finally:
             cur.close()
+            await con.close()
