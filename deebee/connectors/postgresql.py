@@ -1,6 +1,5 @@
 import os
 import aiopg
-import psycopg2
 
 
 def get_dsn(base_key=''):
@@ -22,13 +21,19 @@ def get_db_params(base_key=''):
 
 
 def get_connection_string():
-    user = os.getenv('DB_USER')
-    password = os.getenv('DB_PASSWORD')
-    database = os.getenv('DB_DATABASE')
-    host = os.getenv('DB_HOST')
-    port = os.getenv('DB_PORT')
+    user = os.getenv('DEEBEE_USER')
+    password = os.getenv('DEEBEE_PASSWORD')
+    database = os.getenv('DEEBEE_DATABASE')
+    host = os.getenv('DEEBEE_HOST')
+    port = os.getenv('DEEBEE_PORT')
     connection_string = f"postgresql://{user}:{password}@{host}:{port}/{database}"
     return connection_string
+
+
+async def get_connection():
+    dsn = get_connection_string()
+    con = await aiopg.connect(dsn)
+    return con
 
 
 def get_connection_params():
