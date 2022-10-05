@@ -167,6 +167,8 @@ class DB:
             columns: Union[list[str], tuple[str], str] = None,
             where: dict = None,
             order: Union[list[str], tuple[str], str] = None,
+            page: int = 1,
+            size: int = 20,
             model: any = None
     ) -> Union[list, tuple]:
         """Creates a query and return a list.
@@ -176,6 +178,8 @@ class DB:
 
         The return is the value returned by select method.
 
+        :param size:
+        :param page:
         :param table:
         :param columns:
         :param where:
@@ -190,6 +194,9 @@ class DB:
         if not columns:
             columns = ()
         sql = self.__generate_query_sql(table, columns=columns, where=where, order=order)
+        if page:
+            offset = (page - 1) * size
+            sql = f'{sql} limit {size} offset {offset}'
         data = await self.select(sql, model=model)
         return data
 
@@ -631,10 +638,7 @@ class DB:
             else:
                 ...
         except Exception as e:
-            if select:
-                return None
-            else:
-                raise Exception(e)
+            raise Exception(e)
         finally:
             cur.close()
             await con.close()
