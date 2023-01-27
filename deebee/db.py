@@ -1,6 +1,6 @@
 import asyncio
 import datetime
-from typing import Union
+from typing import Union, Any
 
 from deebee.pool import Pool
 
@@ -271,9 +271,11 @@ class DB:
             self,
             table: str,
             *,
-            data: Union[dict, list] = None,
+            data: Union[Any] = None,
             model: any = None
     ) -> Union[dict, any]:
+        if not isinstance(data, (dict, list)):
+            data = data.dict()
         sql = self.__generate_insert_command(table, data)
         data = await self.__query(sql, one=True, model=model)
         return data
@@ -282,6 +284,7 @@ class DB:
             self,
             table: str,
             *,
+            pk: Union[str, int, float] = '',
             key: Union[str, tuple, list] = '',
             data: Union[dict, list, tuple] = None,
             model: any = None
@@ -295,8 +298,10 @@ class DB:
         :return:
         """
         keys_cols = key.split(',')
+        if len(keys_cols) == 1 and pk != data.get(key, None):
+            raise Exception('PK value must be same of data')
         if isinstance(data, dict):
-            where = {k: data[k] for k in keys_cols}
+            where = {k: data.pop(k) for k in keys_cols}
         else:
             where = {k: None for k in keys_cols}
         sql = self.__generate_update_command(table, data, where=where)
